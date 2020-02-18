@@ -26,7 +26,7 @@ def edgeseg(filename):
 
     ######################################################################
     # Small spurious objects are easily removed by setting a minimum size for valid objects.
-    cells_cleaned = morphology.remove_small_objects(fill_masks, 21)
+    cells_cleaned = morphology.remove_small_objects(fill_masks, 60)
 
     ######################################################################
     # Finally, we use the watershed transform to fill regions of the elevation
