@@ -26,7 +26,7 @@ def edgeseg(filename):
 
     ######################################################################
     # Small spurious objects are easily removed by setting a minimum size for valid objects.
-    cells_cleaned = morphology.remove_small_objects(fill_masks, 60)
+    cells_cleaned = morphology.remove_small_objects(fill_masks, 100)
 
     ######################################################################
     # Finally, we use the watershed transform to fill regions of the elevation
@@ -42,8 +42,12 @@ def edgeseg(filename):
         mask = np.where(labeled_cells == i, 255, 0)
 
         cropped = segment_crop(mask, R)
+
+
+
         if cropped is not None:
             # todo check if folders exist
+
             cv2.imwrite("./Masks/test"+str(i)+".tif", mask)
             cv2.imwrite("./Crops/test" + str(i) + ".tif", cropped)
 
@@ -91,7 +95,7 @@ def segment_crop(mask,image):
 
 
 def main():
-    edgeseg("cell.tif")
+    edgeseg("./CIRA/dehaze_example.tif")
 
 
 if __name__ == '__main__':
