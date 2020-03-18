@@ -1,0 +1,4 @@
+segment and crop the cells
+    get the red channel
+    create label y_train for the cnn
+    train nn 
