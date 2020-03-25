@@ -1,3 +1,0 @@
-
-# AI and DNA Dynamics
-
