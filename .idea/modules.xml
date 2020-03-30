@@ -2,7 +2,7 @@
 <project version="4">
   <component name="ProjectModuleManager">
     <modules>
-      <module fileurl="file://$PROJECT_DIR$/.idea/CODEBASE.iml" filepath="$PROJECT_DIR$/.idea/CODEBASE.iml" />
+      <module fileurl="file://$PROJECT_DIR$/.idea/MQP.iml" filepath="$PROJECT_DIR$/.idea/MQP.iml" />
     </modules>
   </component>
 </project>
