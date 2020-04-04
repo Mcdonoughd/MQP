@@ -10,7 +10,7 @@ A report in a csv detailing
 
 
 '''
-
+import math
 from sklearn.metrics import classification_report
 from sklearn.metrics import f1_score
 from sklearn.metrics import confusion_matrix
@@ -269,7 +269,7 @@ def segment_crop(mask,image,labels):
 
 
     # obtain contours of the nuclei
-    _, contours, hierarchy = cv2.findContours(single_nuclei, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
+    contours, hierarchy = cv2.findContours(single_nuclei, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
 
     # obtain contour area
     cnt = max(contours,key=cv2.contourArea)
@@ -379,7 +379,7 @@ def rotate_bound(image, angle):
 def HOG(img):
     fd, hog_image = hog(img, orientations=8, pixels_per_cell=(4, 4),
                         cells_per_block=(1, 1),block_norm="L2-Hys",visualize=True)
-    return hog_image
+    return fd, hog_image
 
 
 
@@ -425,8 +425,45 @@ def LoG(gray_img, sigma=1., kappa=0.75, pad=False):
     return log_img
 
 
+# padds an image with zeros given the image and the new size
+def padImage(img,newhight,newwidth):
+    h,w = img.shape
+    width_diff = newwidth - w
+    height_diff = newhight - h
 
+    th = int(math.floor(height_diff/2))
+    bh = int(math.ceil(height_diff / 2))
+    rw = int(math.ceil(width_diff / 2))
+    lw = int(math.ceil(width_diff / 2))
 
+    new_img = np.pad(img,[(th,bh),(rw,lw)],mode='constant',constant_values=0)
+    return new_img
+
+import mahotas
+def getZern(img,radius):
+    zern = mahotas.features.zernike_moments(img, radius)
+    return zern
+
+# feature-descriptor-2: Haralick Texture
+def fd_haralick(image):
+    # compute the haralick texture feature vector
+    haralick = mahotas.features.haralick(image).mean(axis=0)
+    # return the result
+    return haralick
+
+# hu moments (similar to zern)
+def fd_hu_moments(image):
+    feature = cv2.HuMoments(cv2.moments(image)).flatten()
+    return feature
+
+def StoreNDArray(dict,featurename,data):
+    if data is not None:
+        if not type(data) == list:
+            data = data.flatten()
+        for idx,val in enumerate(data):
+            dict[featurename+str(idx)] = val
+    else:
+        dict[featurename + str(0)] = 0
 
 
 # given a frame image location, generate crops of individual nuclei
@@ -476,7 +513,7 @@ def genCrops(classdict,frame_location,nuclei_count):
             cv2.imwrite(crop_loc, rot_single_nuclei)
 
             # obtain contours of the rotated nuclei
-            _, contours, hierarchy = cv2.findContours(rot_single_nuclei, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
+            contours, hierarchy = cv2.findContours(rot_single_nuclei, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
 
             # obtain contour area
             cnt = max(contours, key=cv2.contourArea)
@@ -492,7 +529,8 @@ def genCrops(classdict,frame_location,nuclei_count):
             classdict[crop_loc]["Original Frame"] = frame_location
             classdict[crop_loc]["Cropped Frame"] = crop_loc
             classdict[crop_loc]["True Classification"] = classification
-            classdict[crop_loc]["Centroid"] = (x,y)
+            classdict[crop_loc]["Centroid_x"] = x
+            classdict[crop_loc]["Centroid_y"] = y
             classdict[crop_loc]["Major Axis"] = major
             classdict[crop_loc]["Minor Axis"] = minor
             classdict[crop_loc]["Eccentricity"] = ecc
@@ -502,24 +540,49 @@ def genCrops(classdict,frame_location,nuclei_count):
             classdict[crop_loc]["Roundness"] = roundness_feature
             classdict[crop_loc]["Extent"] = ext
 
+            zern = getZern(rot_single_nuclei, int(math.floor(diam/2)))
+            # classdict[crop_loc]["Zernlike Moments"] = zern
+            StoreNDArray(classdict[crop_loc], "Zernlike Moments", zern)
+
+            har = fd_haralick(rot_single_nuclei)
+            # classdict[crop_loc]["Haralick Texture"] = har
+            StoreNDArray(classdict[crop_loc], "Haralick Texture", har)
+
+            hu = fd_hu_moments(rot_single_nuclei)
+            # classdict[crop_loc]["Hu Moments"] = hu
+            StoreNDArray(classdict[crop_loc], "Hu Moments", hu)
+            # 140277877
+            rot_single_nuclei = padImage(rot_single_nuclei, 100, 100)
+
             rate = 2
             img_linear_x = int(rot_single_nuclei.shape[1] * rate)
             img_linear_y = int(rot_single_nuclei.shape[0] * rate)
             pil_im = Image.fromarray(rot_single_nuclei)
             image = pil_im.resize((img_linear_x, img_linear_y), Image.BILINEAR)  # bilinear interpolation
             img_bilinear = np.asarray(image)
+
+
             linear_hist = linearbinarypattern(img_bilinear)
             linear_hist = [int(i) for i in linear_hist]
-            classdict[crop_loc]["Linear Binary Patterns"] = linear_hist
 
-            hog = HOG(img_bilinear)
-            hog_loc = "./HOG/"+str(nuclei_count)+".tif"
-            cv2.imwrite(hog_loc,hog)
-            classdict[crop_loc]["HOG"] = hog_loc
-            log = LoG(img_bilinear)
-            log_loc = "./LOG/" + str(nuclei_count) + ".tif"
-            cv2.imwrite(log_loc, log)
-            classdict[crop_loc]["Laplace of Gaussian"] = log_loc
+
+            # classdict[crop_loc]["Linear Binary Patterns"] = linear_hist
+            StoreNDArray(classdict[crop_loc], "Linear Binary Patterns", linear_hist)
+
+            fd, hog = HOG(img_bilinear)
+            # classdict[crop_loc]["HOG"] = fd
+            # StoreNDArray(classdict[crop_loc], "HOG", fd)
+
+            sift = cv2.xfeatures2d.SIFT_create()
+            kp, des = sift.detectAndCompute(img_bilinear, None)
+            # classdict[crop_loc]["SIFT"] = des
+            # StoreNDArray(classdict[crop_loc], "SIFT", des)
+
+
+            # log = LoG(img_bilinear)
+            # log_loc = "./LOG/" + str(nuclei_count) + ".tif"
+            # cv2.imwrite(log_loc, log)
+            # classdict[crop_loc]["Laplace of Gaussian"] = log_loc
 
             nuclei_count = nuclei_count+1
 
