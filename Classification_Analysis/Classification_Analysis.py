@@ -6,9 +6,7 @@ A Dataset of randomly labeled frames
 
 Output:
 A report in a csv detailing
-    The IOU of each nuclei
-    The Average Precision of each frame
-    The Mean Average Precision of the dataset
+    the Fscore, Precision, and Recall of of each class
 '''
 
 from sklearn.metrics import classification_report
@@ -508,10 +506,6 @@ def getGroundTruths(dataset):
     # report = classification_report(y_true, y_pred, target_names=["Damaged","Healthy","Recovered"],output_dict=True)
     report = classification_report(y_true, y_pred, target_names=["Damaged", "Healthy"], output_dict=True)
 
-    # report["z_TruePos"] = tp
-    # report["z_TrueNeg"] = tn
-    # report["z_FalsePos"] = fp
-    # report["z_FalseNeg"] = fn
 
     dataframe = pd.DataFrame.from_dict(report)
     dataframe.to_csv('classification_report.csv', index=False)

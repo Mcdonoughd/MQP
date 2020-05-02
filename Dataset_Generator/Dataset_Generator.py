@@ -1,15 +1,17 @@
+#!/usr/bin/env python
+# coding: utf-8
 '''
-Dataset_Generator.py by Daniel McDonough
 
-Input:
-A folder of unlabeled nuclei images
-
-Output:
-A report in a csv detailing
-    the a features vector and "true classification"
+# # Dataset Generator
+# ## by Daniel McDonough
 
 
 '''
+
+# In[1]:
+
+
+# Import Required Packages
 import math
 from sklearn.metrics import classification_report
 from sklearn.metrics import f1_score
@@ -26,6 +28,84 @@ from skimage import color
 from skimage.morphology import extrema
 from skimage.feature import hog
 from PIL import Image
+from sklearn.cluster import KMeans
+from skimage.segmentation import clear_border
+from skimage.feature import peak_local_max
+from skimage.morphology import watershed
+import mahotas
+from skimage import exposure
+
+# ### Detect Nuclei
+
+# In[ ]:
+
+
+# Adjust the gamma of a given image
+def adjust_gamma(image, gamma=1.0):
+    # build a lookup table mapping the pixel values [0, 255] to
+    # their adjusted gamma values
+    invGamma = 1.0 / gamma
+    table = np.array([((i / 255.0) ** invGamma) * 255
+        for i in np.arange(0, 256)]).astype("uint8")
+    # apply gamma correction using the lookup table
+    return cv2.LUT(image, table)
+
+
+# Given the nuclei image channel, find nuclei
+def detect_NUCLEI(r):
+    
+    # Gamma correction   
+    r = adjust_gamma(r, gamma=1.5)
+
+    # Otsu's thresholding
+    ret2, th2 = cv2.threshold(r, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+
+    # These contours are then filled using mathematical morphology.
+    fill_masks = ndi.binary_fill_holes(th2)
+
+    # Small spurious objects are easily removed by setting a minimum size for valid objects.
+    cleaned_image = morphology.remove_small_objects(fill_masks, 150)
+    
+    # Perform Distance Transform     
+    D = ndi.distance_transform_edt(cleaned_image)
+    localMax = peak_local_max(D, indices=False, min_distance=20, labels=cleaned_image)
+    
+    # perform a connected component analysis on the local peaks,
+    # using 8-connectivity, then appy the Watershed algorithm
+    markers = ndi.label(localMax, structure=np.ones((3, 3)))[0]
+    labels = watershed(-D, markers, mask=cleaned_image)
+    print("[INFO] {} unique segments found".format(len(np.unique(labels)) - 1))
+
+    # Un comment to bypass watershed
+    # labels, num = ndi.label(cleaned_image, structure=np.ones((3, 3)))
+
+    # remove edge nuclei
+    labels_image = clear_border(labels)
+    
+    # recount labels
+    number_regions = np.delete(np.unique(labels_image), 0)
+
+    return labels_image, number_regions
+
+
+# ### Detect Foci
+
+# In[ ]:
+
+
+# Dehaze the green channel
+def dehaze(g):
+    # find average value
+    avg = np.average(g)
+
+    # I - avg
+    chosen_sub_a = g - avg
+
+    # make sure no negatives
+    chosen_sub_a.astype(int)
+    chosen_sub_a = chosen_sub_a.clip(min=0)
+    return chosen_sub_a
+
 
 # Adaptive median filter of an image
 def adaptive_median_filter(img,sMax):
@@ -83,264 +163,115 @@ def find_otsu_t(img):
     t, thresh_img = cv2.threshold(img,0,255,cv2.THRESH_BINARY+cv2.THRESH_OTSU)
     return t, thresh_img
 
-
 # hmax transform of the image
 def h_max_transform(img,h):
-
-    # if h <= 0:
-    #     h = 1
-    # else:
-    #     h = 1/h
-
-    print("Foci threshold is " + str(h))
     h_maxima = extrema.h_maxima(img, h)
     label_h_maxima = label(h_maxima)
-
     label_h_maxima[label_h_maxima>0] = 255
-
     return label_h_maxima
 
 # Detect the foci of a nuclei, given the green channel
 def detect_FOCI(g):
-    # cv2.imshow("reg", g)
+    # Dehaze
+    dehazed = dehaze(g)
+
+    # Adaptive median filter remove noise     
     for i in range(7, 1, -2):
         g = adaptive_median_filter(g,i)
-    # cv2.imshow("adaptive",g)
 
-    top = top_hat_transform(g,25)
-
+    # Top hat transform to detect posible foci locations    
+    top = top_hat_transform(dehazed,25)
+    
+    # Convert to int     
     top = np.uint8(top)
 
-    # cv2.imshow("top",top)
-
+    # Detect Foci Regions by Threshold 
     t, mask = find_otsu_t(top)
-
-    # cv2.imshow("otsu", mask)
 
     # Get only the object by overylaying the mask
     fig = cv2.bitwise_or(top, top, mask=mask)
 
-    # cv2.imshow("only object", fig)
-
+    # Get the extrema and label the foci  
     labeled = h_max_transform(fig,t)
 
-    return labeled
+    return labeled, dehazed
 
-
-# Move the image to folders based on the classification
+# Detemine class based on foci
 def Classify_Image(foci_image):
-
     b, g, r = cv2.split(foci_image)
-    # determine if nuclei is recovering
+    # If anything is in the blue channel then it is labeled as a foci
     if 255 in b:
-        rec_thresh = np.mean(g) / np.max(g)
-        print("recovering_Thresh: " + str(rec_thresh))
-        if rec_thresh > 0.2:
-            # return "Recovered"
-            return "Damaged"
         return "Damaged"
     return "Healthy"
 
 
-# helper function to compute intersections
-def _rect_inter_inner(x1,x2):
-    n1=x1.shape[0]-1
-    n2=x2.shape[0]-1
-    X1=np.c_[x1[:-1],x1[1:]]
-    X2=np.c_[x2[:-1],x2[1:]]
-    S1=np.tile(X1.min(axis=1),(n2,1)).T
-    S2=np.tile(X2.max(axis=1),(n1,1))
-    S3=np.tile(X1.max(axis=1),(n2,1)).T
-    S4=np.tile(X2.min(axis=1),(n1,1))
-    return S1,S2,S3,S4
+# ### Normalize Nuclei
 
-# helper function to compute intersections
-def _rectangle_intersection_(x1,y1,x2,y2):
-    S1,S2,S3,S4=_rect_inter_inner(x1,x2)
-    S5,S6,S7,S8=_rect_inter_inner(y1,y2)
-
-    C1=np.less_equal(S1,S2)
-    C2=np.greater_equal(S3,S4)
-    C3=np.less_equal(S5,S6)
-    C4=np.greater_equal(S7,S8)
-
-    ii,jj=np.nonzero(C1 & C2 & C3 & C4)
-    return ii,jj
+# In[ ]:
 
 
-# Compute ALL intersections of two lines
-def intersections(x1,y1,x2,y2):
-    """
-INTERSECTIONS Intersections of curves.
-   Computes the (x,y) locations where two curves intersect.  The curves
-   can be broken with NaNs or have vertical segments.
-usage:
-x,y=intersection(x1,y1,x2,y2)
-    Example:
-    a, b = 1, 2
-    phi = np.linspace(3, 10, 100)
-    x1 = a*phi - b*np.sin(phi)
-    y1 = a - b*np.cos(phi)
-    x2=phi
-    y2=np.sin(phi)+2
-    x,y=intersection(x1,y1,x2,y2)
-    plt.plot(x1,y1,c='r')
-    plt.plot(x2,y2,c='g')
-    plt.plot(x,y,'*k')
-    plt.show()
-    """
-    ii,jj=_rectangle_intersection_(x1,y1,x2,y2)
-    n=len(ii)
 
-    dxy1=np.diff(np.c_[x1,y1],axis=0)
-    dxy2=np.diff(np.c_[x2,y2],axis=0)
+# Rotate an image given an angle
+def rotate_bound(image, angle):
+    
+    # grab the dimensions of the image and then determine the 
+    # center
+    (h, w) = image.shape[:2]
+    (cX, cY) = (w // 2, h // 2)
+    
+    # grab the rotation matrix (applying the negative of the
+    # angle to rotate clockwise), then grab the sine and cosine
+    # (i.e., the rotation components of the matrix)
+    M = cv2.getRotationMatrix2D((cX, cY), -angle, 1.0)
+    cos = np.abs(M[0, 0])
+    sin = np.abs(M[0, 1])
+    
+    # compute the new bounding dimensions of the image
+    nW = int((h * sin) + (w * cos))
+    nH = int((h * cos) + (w * sin))
+    
+    # adjust the rotation matrix to take into account translation
+    M[0, 2] += (nW / 2) - cX
+    M[1, 2] += (nH / 2) - cY
+    # perform the actual rotation and return the image
+    return cv2.warpAffine(image, M, (nW, nH))
 
-    T=np.zeros((4,n))
-    AA=np.zeros((4,4,n))
-    AA[0:2,2,:]=-1
-    AA[2:4,3,:]=-1
-    AA[0::2,0,:]=dxy1[ii,:].T
-    AA[1::2,1,:]=dxy2[jj,:].T
+# Pad an image with zeros given the image and the new size
+def padImage(img,newhight,newwidth):
+    h,w = img.shape
+    width_diff = newwidth - w
+    height_diff = newhight - h
 
-    BB=np.zeros((4,n))
-    BB[0,:]=-x1[ii].ravel()
-    BB[1,:]=-x2[jj].ravel()
-    BB[2,:]=-y1[ii].ravel()
-    BB[3,:]=-y2[jj].ravel()
+    th = int(math.floor(height_diff/2))
+    bh = int(math.ceil(height_diff / 2))
+    rw = int(math.ceil(width_diff / 2))
+    lw = int(math.ceil(width_diff / 2))
 
-    for i in range(n):
-        try:
-            T[:,i]=np.linalg.solve(AA[:,:,i],BB[:,i])
-        except:
-            T[:,i]=np.NaN
+    new_img = np.pad(img,[(th,bh),(rw,lw)],mode='constant',constant_values=0)
+    return new_img
 
-    in_range= (T[0,:] >=0) & (T[1,:] >=0) & (T[0,:] <=1) & (T[1,:] <=1)
-
-    xy0=T[2:,in_range]
-    xy0=xy0.T
-    return xy0[:,0],xy0[:,1]
+# Upscale image   
+def bilinear_upscale(image,rate=2):
+    rate = 2
+    img_linear_x = int(image.shape[1] * rate)
+    img_linear_y = int(image.shape[0] * rate)
+    pil_im = Image.fromarray(image)
+    image = pil_im.resize((img_linear_x, img_linear_y), Image.BILINEAR)  # bilinear interpolation
+    image = np.asarray(image)
+    return image
 
 
-# Given an image analyze its histogram and produce a threshold
-def hist_analysis(img):
+# ### Obtain Features
 
-    # Produce hist of original image
-    n,bins = np.histogram(img,bins=256,range=(0,255)) #calculating histogram
-
-    # Fit a 15 degree polynomial
-    t = np.polyfit(bins[0:-1],n,15)
-
-    x1 = np.poly1d(t)
-
-    y1 = x1(bins)
-
-    # Take the polynomial's derivative
-    y1 = np.diff(y1, 2)
-    # # y = y.astype(int)
-    y2 = np.zeros(y1.size)
-
-    # Find the when the derivative is 0
-    x, y = intersections(bins[0:-2], y1, bins[0:-2], y2)
-
-    # UNCOMMENT TO SHOW Histogram curve
-    # plt.plot(x1, y1, c="r")
-    # plt.plot(x, y, "*k")
-    # plt.plot(bins[0:-2], y1)
-    # plt.plot(bins[0:-2], y2)
-    # plt.show()
-
-    # Get the last 0 intersection
-    Threshold = int(x[-1])+3
-
-    # Check edge case of going over 255
-    if Threshold > 255:
-        Threshold = 255
-
-    return Threshold
+# In[ ]:
 
 
-# given a mask and the OG image, overlay mask onto the OG image and return the cropped segmented object
-def segment_crop(mask,image,labels):
-    # convert into unsigned int
-    mask = np.uint8(mask)
-
-    # overlay mask with the original image
-    single_nuclei = cv2.bitwise_and(image, image, mask=mask)
-
-
-    # obtain contours of the nuclei
-    contours, hierarchy = cv2.findContours(single_nuclei, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
-
-    # obtain contour area
-    cnt = max(contours,key=cv2.contourArea)
-
-    # calc bounding box
-    x, y, w, h = cv2.boundingRect(cnt)
-
-    height, width = single_nuclei.shape  # height, width, layers of an image
-    segmented = np.zeros((height, width, 3), dtype="uint8")  # matrix of zeros (black)
-
-    crop_img = None
-
-    # Check if cell is located on the edge of the image
-    if y - 1 < 0 or y + 1 >= height or x - 1 < 0 or x + 1 >= width:
-        print("Cell is too close to the edge, cannot count it. Skipping...")
-    else:
-        single_nuclei_foci = cv2.bitwise_and(labels[:, :, 0], labels[:, :, 0], mask=mask)
-        single_nuclei_green_channel = cv2.bitwise_and(labels[:, :, 1], labels[:, :, 1], mask=mask)
-
-
-        # make overlay into 3 channels (bgr)
-        segmented[:, :, 0] = single_nuclei_foci
-        segmented[:, :, 1] = single_nuclei_green_channel
-        segmented[:, :, 2] = single_nuclei
-
-
-        # crop the image based on bounding box
-        crop_img = segmented[y - 1:y + h + 1, x - 1:x + w + 1]
-        mask = mask[y - 1:y + h + 1, x - 1:x + w + 1]
-        crop_img = cv2.bitwise_and(crop_img, crop_img, mask=mask)
-
-
-    return crop_img,cnt
-
-# Given a frame image location, find nuclei and label them
-def obtainLabels(r):
-
-    img = cv2.equalizeHist(r)
-    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(15, 15))
-    img = clahe.apply(img)
-
-    thresh = hist_analysis(img)
-
-    print("Calculated threshold: " + str(thresh))
-    ret, thresh1 = cv2.threshold(img, thresh, 255, cv2.THRESH_BINARY)
-
-    ######################################################################
-    # These contours are then filled using mathematical morphology.
-    fill_masks = ndi.binary_fill_holes(thresh1)
-
-    ######################################################################
-    # Small spurious objects are easily removed by setting a minimum size for valid objects.
-    cells_cleaned = morphology.remove_small_objects(fill_masks, 150)
-
-    # cells_cleaned = cells_cleaned * 255
-    labeled_cells, num = ndi.label(cells_cleaned)
-    return labeled_cells, num
-
-def dehaze(g):
-    # find average value
-    avg = np.average(g)
-
-    # I - avg
-    chosen_sub_a = g - avg
-
-    # make sure no negatives
-    chosen_sub_a.astype(int)
-    chosen_sub_a = chosen_sub_a.clip(min=0)
-    return chosen_sub_a
-
+# Get Centroid, Major axis, Minor Axis, Eccentricity, and Rotation angles
 def get_axis(cnt):
+
+    if len(cnt) < 5:
+        return 0,0,0,0,0,0,0
+
     (x, y), (MA, ma), angle = cv2.fitEllipse(cnt)
 
     a = ma / 2
@@ -355,92 +286,8 @@ def get_axis(cnt):
 
     return int(round(x)),int(round(y)),int(round(MA)),int(round(ma)),maj_angle,min_angle, ecc
 
-def rotate_bound(image, angle):
-    # grab the dimensions of the image and then determine the
-    # center
-    (h, w) = image.shape[:2]
-    (cX, cY) = (w // 2, h // 2)
-    # grab the rotation matrix (applying the negative of the
-    # angle to rotate clockwise), then grab the sine and cosine
-    # (i.e., the rotation components of the matrix)
-    M = cv2.getRotationMatrix2D((cX, cY), -angle, 1.0)
-    cos = np.abs(M[0, 0])
-    sin = np.abs(M[0, 1])
-    # compute the new bounding dimensions of the image
-    nW = int((h * sin) + (w * cos))
-    nH = int((h * cos) + (w * sin))
-    # adjust the rotation matrix to take into account translation
-    M[0, 2] += (nW / 2) - cX
-    M[1, 2] += (nH / 2) - cY
-    # perform the actual rotation and return the image
-    return cv2.warpAffine(image, M, (nW, nH))
-
-
-def HOG(img):
-    fd, hog_image = hog(img, orientations=8, pixels_per_cell=(4, 4),
-                        cells_per_block=(1, 1),block_norm="L2-Hys",visualize=True)
-    return fd, hog_image
-
-
-
-def LoG(gray_img, sigma=1., kappa=0.75, pad=False):
-    """
-    Applies Laplacian of Gaussians to grayscale image.
-
-    :param gray_img: image to apply LoG to
-    :param sigma:    Gauss sigma of Gaussian applied to image, <= 0. for none
-    :param kappa:    difference threshold as factor to mean of image values, <= 0 for none
-    :param pad:      flag to pad output w/ zero border, keeping input image size
-    """
-    assert len(gray_img.shape) == 2
-    img = cv2.GaussianBlur(gray_img, (0, 0), sigma) if 0. < sigma else gray_img
-    img = cv2.Laplacian(img, cv2.CV_64F)
-    rows, cols = img.shape[:2]
-    # min/max of 3x3-neighbourhoods
-    min_map = np.minimum.reduce(list(img[r:rows-2+r, c:cols-2+c]
-                                     for r in range(3) for c in range(3)))
-    max_map = np.maximum.reduce(list(img[r:rows-2+r, c:cols-2+c]
-                                     for r in range(3) for c in range(3)))
-    # bool matrix for image value positiv (w/out border pixels)
-    pos_img = 0 < img[1:rows-1, 1:cols-1]
-    # bool matrix for min < 0 and 0 < image pixel
-    neg_min = min_map < 0
-    neg_min[1 - pos_img] = 0
-    # bool matrix for 0 < max and image pixel < 0
-    pos_max = 0 < max_map
-    pos_max[pos_img] = 0
-    # sign change at pixel?
-    zero_cross = neg_min + pos_max
-    # values: max - min, scaled to 0--255; set to 0 for no sign change
-    value_scale = 255. / max(1., img.max() - img.min())
-    values = value_scale * (max_map - min_map)
-    values[1 - zero_cross] = 0.
-    # optional thresholding
-    if 0. <= kappa:
-        thresh = float(np.absolute(img).mean()) * kappa
-        values[values < thresh] = 0.
-    log_img = values.astype(np.uint8)
-    if pad:
-        log_img = np.pad(log_img, pad_width=1, mode='constant', constant_values=0)
-    return log_img
-
-
-# padds an image with zeros given the image and the new size
-def padImage(img,newhight,newwidth):
-    h,w = img.shape
-    width_diff = newwidth - w
-    height_diff = newhight - h
-
-    th = int(math.floor(height_diff/2))
-    bh = int(math.ceil(height_diff / 2))
-    rw = int(math.ceil(width_diff / 2))
-    lw = int(math.ceil(width_diff / 2))
-
-    new_img = np.pad(img,[(th,bh),(rw,lw)],mode='constant',constant_values=0)
-    return new_img
-
-import mahotas
-def getZern(img,radius):
+# Zernlike Moments
+def fd_Zern(img,radius):
     zern = mahotas.features.zernike_moments(img, radius)
     return zern
 
@@ -456,198 +303,83 @@ def fd_hu_moments(image):
     feature = cv2.HuMoments(cv2.moments(image)).flatten()
     return feature
 
-def StoreNDArray(dict,featurename,data):
-    if data is not None:
-        if not type(data) == list:
-            data = data.flatten()
-        for idx,val in enumerate(data):
-            dict[featurename+str(idx)] = val
-    else:
-        dict[featurename + str(0)] = 0
-
-
-# given a frame image location, generate crops of individual nuclei
-def genCrops(classdict,frame_location,nuclei_count):
-
-    data_array = cv2.imread(frame_location, 1)
-    b, g, r = cv2.split(data_array)
-
-    # De haze the green channel
-    g = dehaze(g)
-
-    # obtain the foci locations
-    foci_labeled = detect_FOCI(g)
-
-    # obtain the nuclei locations
-    labeled_cells,num = obtainLabels(r)
-
-    # make an image with all GFP, nuclei labels, and foci labels,
-    detected_nuclei = labeled_cells.copy()
-    detected_nuclei[detected_nuclei>0]=255
-
-    height, width = labeled_cells.shape  # height, width, layers of an image
-    all_labels = np.zeros((height, width, 3), dtype="uint8")  # matrix of zeros (black)
-
-    all_labels[:,:,0] = foci_labeled
-    all_labels[:, :, 1] = g
-    all_labels[:, :, 2] = detected_nuclei
-
-
-    # iterate through each label/cell
-    for i in range(1,num+1):
-
-        # obtain a mask of each cell
-        mask = np.where(labeled_cells == i, 255, 0)
-
-        # crop the individual cell
-        cropped_all_label,cnt = segment_crop(mask, r, all_labels)
-
-        # check if is edge cell / None
-        if cropped_all_label is not None:
-            single_nuclei = cropped_all_label[:,:,2]
-            x, y, minor, major, maj_angle, min_angle, ecc = get_axis(cnt)
-
-            rot_single_nuclei = rotate_bound(single_nuclei, -maj_angle)
-
-            crop_loc = "./Crops/" + str(nuclei_count) + ".tif"
-            cv2.imwrite(crop_loc, rot_single_nuclei)
-
-            # obtain contours of the rotated nuclei
-            contours, hierarchy = cv2.findContours(rot_single_nuclei, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
-
-            # obtain contour area
-            cnt = max(contours, key=cv2.contourArea)
-
-            asp = aspect_ratio(cnt)
-            ext = extent(cnt)
-            sold = solidity(cnt)
-            diam = Equi_diameter(cnt)
-            roundness_feature = roundness(cnt)
-
-            classification = Classify_Image(cropped_all_label)
-            classdict[crop_loc] = {}
-            classdict[crop_loc]["Original Frame"] = frame_location
-            classdict[crop_loc]["Cropped Frame"] = crop_loc
-            classdict[crop_loc]["True Classification"] = classification
-            classdict[crop_loc]["Centroid_x"] = x
-            classdict[crop_loc]["Centroid_y"] = y
-            classdict[crop_loc]["Major Axis"] = major
-            classdict[crop_loc]["Minor Axis"] = minor
-            classdict[crop_loc]["Eccentricity"] = ecc
-            classdict[crop_loc]["Aspect Ratio"] = asp
-            classdict[crop_loc]["Solidity"] = sold
-            classdict[crop_loc]["Equivalent Diameter"] = diam
-            classdict[crop_loc]["Roundness"] = roundness_feature
-            classdict[crop_loc]["Extent"] = ext
-
-            zern = getZern(rot_single_nuclei, int(math.floor(diam/2)))
-            # classdict[crop_loc]["Zernlike Moments"] = zern
-            StoreNDArray(classdict[crop_loc], "Zernlike Moments", zern)
-
-            har = fd_haralick(rot_single_nuclei)
-            # classdict[crop_loc]["Haralick Texture"] = har
-            StoreNDArray(classdict[crop_loc], "Haralick Texture", har)
-
-            hu = fd_hu_moments(rot_single_nuclei)
-            # classdict[crop_loc]["Hu Moments"] = hu
-            StoreNDArray(classdict[crop_loc], "Hu Moments", hu)
-            # 140277877
-            rot_single_nuclei = padImage(rot_single_nuclei, 100, 100)
-
-            rate = 2
-            img_linear_x = int(rot_single_nuclei.shape[1] * rate)
-            img_linear_y = int(rot_single_nuclei.shape[0] * rate)
-            pil_im = Image.fromarray(rot_single_nuclei)
-            image = pil_im.resize((img_linear_x, img_linear_y), Image.BILINEAR)  # bilinear interpolation
-            img_bilinear = np.asarray(image)
-
-
-            linear_hist = linearbinarypattern(img_bilinear)
-            linear_hist = [int(i) for i in linear_hist]
-
-
-            # classdict[crop_loc]["Linear Binary Patterns"] = linear_hist
-            StoreNDArray(classdict[crop_loc], "Linear Binary Patterns", linear_hist)
-
-            fd, hog = HOG(img_bilinear)
-            # classdict[crop_loc]["HOG"] = fd
-            # StoreNDArray(classdict[crop_loc], "HOG", fd)
-
-            sift = cv2.xfeatures2d.SIFT_create()
-            kp, des = sift.detectAndCompute(img_bilinear, None)
-            # classdict[crop_loc]["SIFT"] = des
-            # StoreNDArray(classdict[crop_loc], "SIFT", des)
-
-
-            # log = LoG(img_bilinear)
-            # log_loc = "./LOG/" + str(nuclei_count) + ".tif"
-            # cv2.imwrite(log_loc, log)
-            # classdict[crop_loc]["Laplace of Gaussian"] = log_loc
-
-            nuclei_count = nuclei_count+1
-
-    return classdict,nuclei_count
-
-
-# given a list of ground truth location, find their classification based on the labeling of the image
-def get_groundtruth_labels(groundtruths_locations):
-    classes_list = []
-    for location in groundtruths_locations:
-        # print(location)
-        image = cv2.imread(location,1)
-        b,g,r = cv2.split(image)
-        # Here the index is correlates to blue,green,red
-        classification = np.array([np.sum(b),np.sum(g),np.sum(r)])
-        index = np.where(classification > 0)[0]
-        classes_list.append(index[0])
-    dictionary = dict(zip(groundtruths_locations, classes_list))
-    return dictionary
-
-
-def aspect_ratio(cnt):
+# Calculates the aspect ratio of the min bounding box of a nuclei
+def fd_aspect_ratio(cnt):
     x,y,w,h = cv2.boundingRect(cnt)
     aspect_ratio = float(w)/h
     return aspect_ratio
 
-
-def extent(cnt):
+# Calculates the ratio between the nuclei's contour and bounding rectangle
+def fd_extent(cnt):
     area = cv2.contourArea(cnt)
     x,y,w,h = cv2.boundingRect(cnt)
     rect_area = w*h
     extent = float(area)/rect_area
     return extent
 
-
-def solidity(cnt):
+# Calculates the extent a shape is concave or convex 
+def fd_solidity(cnt):
     area = cv2.contourArea(cnt)
     hull = cv2.convexHull(cnt)
     hull_area = cv2.contourArea(hull)
     solid = float(area)/hull_area
     return solid
 
-
-def Equi_diameter(cnt):
+# Calculated the Equivalent Diameter of min circle packing
+def fd_Equi_diameter(cnt):
     area = cv2.contourArea(cnt)
     equi_diameter = np.sqrt(4*area/np.pi)
     return int(round(equi_diameter))
 
-
-def roundness(contour):
-    """Calculates the roundness of a contour"""
-    moments = cv2.moments(contour)
-    length = cv2.arcLength(contour, True)
+# Calculates the roundness of a contour
+def fd_roundness(cnt):
+    moments = cv2.moments(cnt)
+    length = cv2.arcLength(cnt, True)
     k = (length * length) / (moments['m00'] * 4 * np.pi)
     return k
 
-def get_pixel(img, center, x, y):
-    new_value = 0
-    try:
-        if img[x][y] >= center:
-            new_value = 1
-    except:
-        pass
-    return new_value
+# Histogram of oriented Gradients 
+def fd_HOG(img):
+    (H, hogImage) = hog(img, orientations=9, pixels_per_cell=(8, 8),
+                                cells_per_block=(2, 2), transform_sqrt=True, block_norm="L2-Hys",
+                                visualize=True)
+    hogImage = exposure.rescale_intensity(hogImage, out_range=(0, 255))
+    hogImage = hogImage.astype("uint8")
 
+    return hogImage
+
+# Calculate SIFT descriptors
+def fd_SIFT(img):
+    sift = cv2.xfeatures2d.SIFT_create()
+    kp, des = sift.detectAndCompute(rot_single_nuclei, None)
+    return des
+
+# Calculate GaborWavelet descriptor
+def fd_GaborWavelet(img):
+    filters = []
+    ksize = 31
+    for theta in np.arange(0, np.pi, np.pi / 16):
+        kern = cv2.getGaborKernel((ksize, ksize), 4.0, theta, 10.0, 0.5, 0, ktype=cv2.CV_32F)
+    kern /= 1.5 * kern.sum()
+    filters.append(kern)
+    
+    accum = np.zeros_like(img)
+    for kern in filters:
+        fimg = cv2.filter2D(img, cv2.CV_8UC3, kern)
+    np.maximum(accum, fimg, accum)
+    return accum
+
+
+# Calculate LBP descriptors
+def fd_linearbinarypattern(img):
+    height, width = img.shape
+    img_lbp = np.zeros((height, width, 3), np.uint8)
+    for i in range(0, height):
+        for j in range(0, width):
+            img_lbp[i, j] = lbp_calculated_pixel(img, i, j)
+    hist_lbp = cv2.calcHist([img_lbp], [0], None, [256], [0, 256])
+    hist_lbp = [int(i) for i in hist_lbp]
+    return hist_lbp   
 
 def lbp_calculated_pixel(img, x, y):
     '''
@@ -674,43 +406,82 @@ def lbp_calculated_pixel(img, x, y):
         val += val_ar[i] * power_val[i]
     return val
 
-def linearbinarypattern(img):
-    height, width = img.shape
-    img_lbp = np.zeros((height, width, 3), np.uint8)
-    for i in range(0, height):
-        for j in range(0, width):
-            img_lbp[i, j] = lbp_calculated_pixel(img, i, j)
-    hist_lbp = cv2.calcHist([img_lbp], [0], None, [256], [0, 256])
-    return hist_lbp
-
-# Given a dataset location, Return the frame file location and a list of ground truth locations
-def getDataset(dataset):
-
-    # Get all folders in the dataset
-    folders = os.listdir(dataset)
-    folders.sort()
-    nuclei_count = 0
-
-    classdict = {}
-
-    # for each folder...
-    for frame in folders:
-        frame_img_location = os.path.join(dataset,frame)
-        print("Running tests on " + frame_img_location)
-
-        classdict, nuclei_count = genCrops(classdict,frame_img_location,nuclei_count)
-
-    dataframe = pd.DataFrame.from_dict(classdict).T
-    dataframe.to_csv('dataset_report.csv', index=False)
-
-    return classdict
+def get_pixel(img, center, x, y):
+    new_value = 0
+    try:
+        if img[x][y] >= center:
+            new_value = 1
+    except:
+        pass
+    return new_value
 
 
-# make folders required for data storage
+# Laplacian of Gaussian of an image
+def fd_LoG(gray_img, sigma=1., kappa=0.75, pad=False):
+    """
+    Applies Laplacian of Gaussians to grayscale image.
+
+    :param gray_img: image to apply LoG to
+    :param sigma:    Gauss sigma of Gaussian applied to image, <= 0. for none
+    :param kappa:    difference threshold as factor to mean of image values, <= 0 for none
+    :param pad:      flag to pad output w/ zero border, keeping input image size
+    """
+    assert len(gray_img.shape) == 2
+    img = cv2.GaussianBlur(gray_img, (0, 0), sigma) if 0. < sigma else gray_img
+    img = cv2.Laplacian(img, cv2.CV_64F)
+    rows, cols = img.shape[:2]
+    
+    # min/max of 3x3-neighbourhoods
+    min_map = np.minimum.reduce(list(img[r:rows-2+r, c:cols-2+c]
+                                     for r in range(3) for c in range(3)))
+    max_map = np.maximum.reduce(list(img[r:rows-2+r, c:cols-2+c]
+                                     for r in range(3) for c in range(3)))
+    
+    # bool matrix for image value positiv (w/out border pixels)
+    pos_img = 0 < img[1:rows-1, 1:cols-1]
+    
+    # bool matrix for min < 0 and 0 < image pixel
+    neg_min = min_map < 0
+    neg_min[1 - pos_img] = 0
+    
+    # bool matrix for 0 < max and image pixel < 0
+    pos_max = 0 < max_map
+    pos_max[pos_img] = 0
+    
+    # sign change at pixel?
+    zero_cross = neg_min + pos_max
+    
+    # values: max - min, scaled to 0--255; set to 0 for no sign change
+    value_scale = 255. / max(1., img.max() - img.min())
+    values = value_scale * (max_map - min_map)
+    values[1 - zero_cross] = 0.
+    
+    # optional thresholding
+    if 0. <= kappa:
+        thresh = float(np.absolute(img).mean()) * kappa
+        values[values < thresh] = 0.
+    log_img = values.astype(np.uint8)
+    if pad:
+        log_img = np.pad(log_img, pad_width=1, mode='constant', constant_values=0)
+    return log_img
+
+
+# ### Dataset Genrator
+
+# In[ ]:
+
+
+# Location of Dataset
+Dataset_location = "./Dataset"
+
+
+# In[ ]:
+
+
+# Make folders required for data storage
 def makeFolders(folders = None):
     if folders is None:
-        folders = ["./Crops", "./HOG", "./LOG"]
-
+        folders = ["./Crops","./LOG","./Gabor","./HOG","./SIFT"]
     for path in folders:
         if os.path.exists(path):
             for root, dirs, files in os.walk(path):
@@ -720,13 +491,244 @@ def makeFolders(folders = None):
             os.mkdir(path)
 
 
-if __name__ == '__main__':
-    simple_dataset = "./Dataset"
+# In[ ]:
 
-    # makeFolders()
-    report = getDataset(simple_dataset)
-    print(report)
 
+# Store ND array to a dictionary
+def StoreNDArray(dict,featurename,data):
+    if data is not None:
+        if not type(data) == list:
+            data = data.flatten()
+        for idx,val in enumerate(data):
+            dict[featurename+str(idx)] = val
+    else:
+        dict[featurename + str(0)] = 0
+
+
+def StoreHaralickFeature(dict,data):
+    haralick_featres = ["ang second moment","contrast","correlation","sum of squares: varience", "inverse Diff moment",
+                        "sum average","sum varience","sum entropy","entropy", "diff varience","dif entropy","measure of corro 1", "measure of corro 2"]
+    for idx,val in enumerate(data):
+        dict[haralick_featres[idx]] = val
+
+# In[ ]:
+
+
+# Make folders to store crops
+makeFolders()
+
+# Get Frames in the dataset
+Frames_list = os.listdir(Dataset_location)
+Frames_list.sort()
+
+# Nuclei tracker over all nuclei
+nuclei_count = 0
+
+# Report Dictionary
+classdict = {}
+
+
+# for each frame in the dataset...
+for frame in Frames_list:
+    frame_img_location = os.path.join(Dataset_location,frame)
+    print("Generating Nuclei Crops for: " + frame_img_location)
+
+    # Read the image and split by channel
+    data_array = cv2.imread(frame_img_location, 1)
+    b, g, r = cv2.split(data_array)
+
+    '''
+    NOTE: 
+    
+    "labeled" means that each nuclei is given a 
+    unique identifier [1-255] and background is 0
+    
+    '''
+############### Detect FOCI #########################
+
+    # obtain the foci locations
+    foci_labeled, dehazed = detect_FOCI(g)
+
+############### Detect Nuclei #########################
+
+    # obtain the nuclei locations
+    labeled_cells,num = detect_NUCLEI(r)
+
+    
+
+    # make an image with all GFP, nuclei labels, and foci labels,
+    detected_nuclei = labeled_cells.copy()
+    detected_nuclei[detected_nuclei>0]=255
+    
+    # height, width, layers of an image
+    height, width = labeled_cells.shape
+
+    all_labels = np.zeros((height, width, 3), dtype="uint8")  # matrix of zeros (black)
+    all_labels[:, :, 0] = foci_labeled
+    all_labels[:, :, 1] = dehazed
+    all_labels[:, :, 2] = detected_nuclei
+
+    # iterate through each nuclei
+    for i in num:
+                
+############### Mask Segmentation #########################
+        
+        # obtain a mask of the nuclei
+        mask = np.where(labeled_cells == i, 255, 0)
+    
+        '''
+        crop the individual cell
+        given a mask and the OG image, 
+        overlay mask onto the OG image 
+        and return the cropped segmented object
+        '''
+       
+        # convert into unsigned int
+        mask = np.uint8(mask)
+
+        # overlay mask with the original image
+        single_nuclei = cv2.bitwise_and(r, r, mask=mask)
+
+        # obtain contours of the nuclei
+        contours, hierarchy = cv2.findContours(single_nuclei, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
+        
+        if not len(contours) == 0:
+            # obtain max contour area
+            cnt = max(contours, key=cv2.contourArea)
+
+            # calc bounding box
+            x, y, w, h = cv2.boundingRect(cnt)
+
+            # Crop the 3 layer channels
+            single_nuclei_foci = cv2.bitwise_and(all_labels[:, :, 0], all_labels[:, :, 0], mask=mask)
+            single_nuclei_green_channel = cv2.bitwise_and(all_labels[:, :, 1], all_labels[:, :, 1], mask=mask)
+
+            segmented = np.zeros((height, width, 3), dtype="uint8")  # matrix of zeros (black)
+
+            # make overlay into 3 channels (bgr)
+            segmented[:, :, 0] = single_nuclei_foci
+            segmented[:, :, 1] = single_nuclei_green_channel
+            segmented[:, :, 2] = single_nuclei
+
+            # crop the image based on bounding box
+            crop_img = segmented[y - 1:y + h + 1, x - 1:x + w + 1]
+            mask = mask[y - 1:y + h + 1, x - 1:x + w + 1]
+            crop_img = cv2.bitwise_and(crop_img, crop_img, mask=mask)
+
+            # Increment nuclei count            
+            nuclei_count = nuclei_count+1
+            
+            
+            
+############### Normalize Nuclei #########################
+           
+            # Get just the red channel         
+            single_nuclei = crop_img[:,:,2]
+    
+            # Obtain Axis Features         
+            x, y, minor, major, maj_angle, min_angle, ecc = get_axis(cnt)
+            
+            # Rotate the nuclei             
+            rot_single_nuclei = rotate_bound(single_nuclei, -maj_angle)
+            
+            # Pad inamge to 200x200            
+            rot_single_nuclei = padImage(rot_single_nuclei, 150, 150)
+
+            # Write nuclei to file             
+            crop_loc = "./Crops/" + str(nuclei_count) + ".tif"
+            cv2.imwrite(crop_loc, rot_single_nuclei)
+            
+            # Upscale image       
+            rot_single_nuclei = bilinear_upscale(rot_single_nuclei,rate=2)
+            cv2.imwrite(crop_loc, rot_single_nuclei)
+
+            ############### Feature Extraction #########################
+
+            print("Obtaining Features for nuclei " + str(nuclei_count))
+
+            classification = Classify_Image(crop_img)
+            asp = fd_aspect_ratio(cnt)
+            ext = fd_extent(cnt)
+            sold = fd_solidity(cnt)
+            diam = fd_Equi_diameter(cnt)
+            roundness_feature = fd_roundness(cnt)
+            zern = fd_Zern(rot_single_nuclei, int(math.floor(diam/2)))
+            har = fd_haralick(rot_single_nuclei)
+            hu = fd_hu_moments(rot_single_nuclei)
+            linear_hist = fd_linearbinarypattern(rot_single_nuclei)
+            fd = fd_HOG(rot_single_nuclei)
+            des = fd_SIFT(rot_single_nuclei)
+            log = fd_LoG(rot_single_nuclei)
+            Gabor = fd_GaborWavelet(rot_single_nuclei)
+            
+############### Write to file #########################
+
+
+            classdict[crop_loc] = {}
+            
+            # 1D descriptors           
+            classdict[crop_loc]["Original Frame"] = frame_img_location
+            classdict[crop_loc]["Cropped Frame"] = crop_loc
+            classdict[crop_loc]["True Classification"] = classification
+            classdict[crop_loc]["Centroid_x"] = x
+            classdict[crop_loc]["Centroid_y"] = y
+            classdict[crop_loc]["Major Axis"] = major
+            classdict[crop_loc]["Minor Axis"] = minor
+            classdict[crop_loc]["Eccentricity"] = ecc
+            classdict[crop_loc]["Aspect Ratio"] = asp
+            classdict[crop_loc]["Solidity"] = sold
+            classdict[crop_loc]["Equivalent Diameter"] = diam
+            classdict[crop_loc]["Roundness"] = roundness_feature
+            classdict[crop_loc]["Extent"] = ext
+            
+            # 2D descriptors             
+            
+            # classdict[crop_loc]["Zernlike Moments"] = zern
+            StoreNDArray(classdict[crop_loc], "Zernlike Moments", zern)
+ 
+            # classdict[crop_loc]["Haralick Texture"] = har
+            # StoreNDArray(classdict[crop_loc], "Haralick Texture", har)
+            StoreHaralickFeature(classdict[crop_loc],har)
+
+            # classdict[crop_loc]["Hu Moments"] = hu
+            StoreNDArray(classdict[crop_loc], "Hu Moments", hu)
+            
+            # classdict[crop_loc]["Linear Binary Patterns"] = linear_hist
+            StoreNDArray(classdict[crop_loc], "Linear Binary Patterns", linear_hist)
+
+            # classdict[crop_loc]["HOG"] = fd
+            # print(fd.shape)
+            # StoreNDArray(classdict[crop_loc], "HOG", fd)
+            HOG_loc = "./HOG/" + str(nuclei_count)+".tif"
+            cv2.imwrite(HOG_loc, fd)
+            classdict[crop_loc]["HOG"] = HOG_loc
+
+            # classdict[crop_loc]["SIFT"] = des
+            StoreNDArray(classdict[crop_loc], "SIFT", des)
+            SIFT_loc = "./SIFT/" + str(nuclei_count)+".npy"
+            np.save(SIFT_loc, fd)
+            # classdict[crop_loc]["SIFT"] = SIFT_loc
+
+            # classdict[crop_loc]["Laplace of Gaussian"] = log
+            # StoreNDArray(classdict[crop_loc], "Laplace of Gaussian", log)
+            LOG_loc = "./LOG/" + str(nuclei_count) + ".tif"
+            cv2.imwrite(LOG_loc, log)
+            classdict[crop_loc]["Laplace of Gaussian"] = LOG_loc
+
+            Gabor_loc = "./Gabor/" + str(nuclei_count) + ".tif"
+            cv2.imwrite(Gabor_loc,Gabor)
+            classdict[crop_loc]["Gabor Wavelet"] = Gabor_loc
+            # classdict[crop_loc]["Gabor Wavelet"] = Gabor
+            # StoreNDArray(classdict[crop_loc], "Gabor Wavelet", Gabor)
+            
+        
+print("Writing to file...")        
+dataframe = pd.DataFrame.from_dict(classdict).T
+dataframe.to_csv('dataset_report_notebook.csv', index=False)
+print("Done!")
+
+
+# In[ ]:
 
 
 
