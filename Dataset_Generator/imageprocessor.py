@@ -64,7 +64,6 @@ def combineImages(df, col=12, rows=12, size=32):
             y_offset+=size
             x_offset = 0
 
-
     return img_arr
 
 
